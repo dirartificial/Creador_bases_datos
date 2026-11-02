@@ -1,0 +1,9 @@
+node_modules
+dist
+.env
+.env.*
+!.env.example
+*.local
+coverage
+PLAN_v2_web_estatico_BYOK.md
+PROMPT_BASE.md

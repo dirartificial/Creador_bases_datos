@@ -1,0 +1,29 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`Fase 3 — Generador Determinístico de Diagramas ER Mermaid (erDiagram.ts) > cumple con el snapshot test para el modelo completo de veterinaria 1`] = `
+"erDiagram
+
+    %% Relaciones del modelo relacional
+    Cliente ||--o{ Mascota : "tiene registradas"
+    Mascota |o--|{ Turno : "recibe atenciones en"
+
+    %% Entidades y definiciones de atributos
+    Cliente {
+        int id_cliente PK "Identificador único del cliente"
+        string nombre "Nombre del cliente"
+        string email UK "Correo electrónico único"
+    }
+    Mascota {
+        int id_mascota PK "Identificador único de la mascota"
+        int id_cliente FK "Dueño de la mascota (FK)"
+        string nombre "Nombre de la mascota"
+        date fecha_nacimiento "Fecha de nacimiento"
+        boolean activo "Estado activo o dado de baja"
+    }
+    Turno {
+        int id_turno PK "Identificador único del turno"
+        int id_mascota FK "Mascota citada (FK)"
+        datetime fecha_hora "Momento exacto del turno"
+        float costo "Precio estimado de la atención"
+    }"
+`;
