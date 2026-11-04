@@ -209,14 +209,23 @@ describe('Soporte Multi-Proveedor LLM (OpenRouter Free Tier, Ollama Local y Robu
     expect(validarFormatoKey('cualquier-cosa', 'ollama').valida).toBe(true);
   });
 
-  it('establece gemini-3.8-flash como modelo por defecto de Gemini y lo normaliza a gemini-2.0-flash para la API', async () => {
-    const { GEMINI_MODEL, obtenerModeloActivo, normalizarModeloGemini } = await import(
-      '../src/core/gemini'
-    );
-    expect(GEMINI_MODEL).toBe('gemini-3.8-flash');
-    expect(obtenerModeloActivo()).toBe('gemini-3.8-flash');
-    expect(normalizarModeloGemini('gemini-3.8-flash')).toBe('gemini-2.0-flash');
-    expect(normalizarModeloGemini('gemini-2.5-flash')).toBe('gemini-2.0-flash');
+  it('establece gemini-2.5-flash como modelo por defecto de Gemini y respeta el modelo seleccionado por el usuario', async () => {
+    const {
+      GEMINI_MODEL,
+      obtenerModeloActivo,
+      establecerModeloActivo,
+      normalizarModeloGemini,
+    } = await import('../src/core/gemini');
+    expect(GEMINI_MODEL).toBe('gemini-2.5-flash');
+    expect(obtenerModeloActivo()).toBe('gemini-2.5-flash');
+    expect(normalizarModeloGemini('gemini-2.5-flash')).toBe('gemini-2.5-flash');
+    expect(normalizarModeloGemini('gemini-2.5-flash-lite')).toBe('gemini-2.5-flash-lite');
+    expect(normalizarModeloGemini('models/gemini-2.0-flash')).toBe('gemini-2.0-flash');
+    expect(normalizarModeloGemini('gemini-3.8-flash')).toBe('gemini-2.5-flash');
+
+    establecerModeloActivo('gemini-2.5-pro');
+    expect(obtenerModeloActivo()).toBe('gemini-2.5-pro');
+    establecerModeloActivo(GEMINI_MODEL);
   });
 
   it('extraerJsonDeTexto extrae correctamente objetos JSON incluso con texto previo o formato markdown irregular', async () => {

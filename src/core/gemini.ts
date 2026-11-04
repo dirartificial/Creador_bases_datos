@@ -4,19 +4,22 @@ import { obtenerApiKey, obtenerProveedorActivo, ProveedorLLM } from './key';
 
 /**
  * Constante única para configurar el modelo por defecto de Gemini en toda la aplicación.
- * Ahora configurado por defecto a `gemini-3.8-flash`.
+ * Configurado por defecto a `gemini-2.5-flash` (modelo vigente en Google AI Studio con capa gratuita activa).
  */
-export const GEMINI_MODEL = 'gemini-3.8-flash';
+export const GEMINI_MODEL = 'gemini-2.5-flash';
 
 /**
- * Lista de modelos Flash gratuitos recomendados en Google AI Studio como alternativas.
+ * Lista de modelos recomendados en Google AI Studio como alternativas.
  */
 export const MODELOS_ALTERNATIVOS = [
-  'gemini-3.8-flash',
+  'gemini-2.5-flash',
+  'gemini-2.5-flash-lite',
+  'gemini-2.5-pro',
+  'gemini-3-flash-preview',
   'gemini-2.0-flash',
-  'gemini-1.5-flash',
-  'gemini-1.5-flash-8b',
+  'gemini-2.0-flash-lite',
   'gemini-flash-latest',
+  'gemini-flash-lite-latest',
 ] as const;
 
 /**
@@ -279,17 +282,16 @@ async function llamarOpenRouter(params: {
 }
 
 /**
- * Normaliza el nombre del modelo para Google GenAI oficial.
- * En Google AI Studio la API real requiere un modelo oficial vigente (como "gemini-2.0-flash" o "gemini-1.5-flash").
- * Si el usuario tiene seleccionado "gemini-3.8-flash" (o variantes 3.x / 2.5),
- * mapeamos transparentemente al modelo oficial de Google "gemini-2.0-flash" para evitar errores HTTP 404 ("models/... is not found").
+ * Normaliza el nombre del modelo para Google GenAI oficial quitando el prefijo `models/` si estuviera presente
+ * y respetando exactamente el modelo seleccionado por el usuario.
  */
 export function normalizarModeloGemini(modelo: string): string {
-  const m = modelo.toLowerCase();
-  if (m.includes('3.8') || m.includes('3.5') || m.includes('2.5')) {
-    return 'gemini-2.0-flash';
+  const limpio = modelo.trim().replace(/^models\//i, '');
+  if (!limpio) return GEMINI_MODEL;
+  if (limpio.toLowerCase() === 'gemini-3.8-flash') {
+    return GEMINI_MODEL;
   }
-  return modelo;
+  return limpio;
 }
 
 /**
@@ -689,29 +691,16 @@ export async function probarConexionGemini(
     try {
       const detectados = await cliente.listarModelos();
       if (detectados.length > 0) {
-        modelosDisponibles = detectados;
-        if (!detectados.includes(modeloActivo)) {
-          if (proveedor === 'ollama') {
-            const preferido =
-              detectados.find((m) => m.startsWith('qwen2.5-coder')) ??
-              detectados.find((m) => m.includes('coder') || m.includes('sql')) ??
-              detectados[0];
-            if (preferido) modeloActivo = preferido;
-          } else if (proveedor === 'openrouter') {
-            const preferido =
-              detectados.find((m) => m.includes('gemini-2.0-flash')) ?? detectados[0];
-            if (preferido) modeloActivo = preferido;
-          } else {
-            const preferido =
-              MODELOS_ALTERNATIVOS.find((m) => detectados.includes(m)) ??
-              detectados.find((m) => m.includes('flash')) ??
-              detectados[0];
-            if (preferido) modeloActivo = preferido;
-          }
+        if (proveedor === 'gemini') {
+          modelosDisponibles = Array.from(
+            new Set([modeloActivo, ...MODELOS_ALTERNATIVOS, ...detectados])
+          );
+        } else {
+          modelosDisponibles = Array.from(new Set([modeloActivo, ...detectados]));
         }
       }
     } catch {
-      // Ignorar fallo de listado y continuar con prueba de generación
+      // Ignorar fallo de listado y continuar con prueba de generación usando el modelo seleccionado
     }
   }
 

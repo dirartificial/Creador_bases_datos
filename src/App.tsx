@@ -198,7 +198,14 @@ export function App() {
         }
       });
     } else {
-      setModelosOpciones([...MODELOS_ALTERNATIVOS]);
+      setModelosOpciones((prev) =>
+        Array.from(
+          new Set([
+            ...MODELOS_ALTERNATIVOS,
+            ...prev.filter((m) => m.startsWith('gemini')),
+          ])
+        )
+      );
     }
     return () => {
       cancelado = true;
@@ -244,6 +251,7 @@ export function App() {
   const handleCambioModelo = (nuevo: string) => {
     establecerModeloActivo(nuevo);
     setModeloSeleccionado(nuevo);
+    setModelosOpciones((prev) => (prev.includes(nuevo) ? prev : [nuevo, ...prev]));
   };
 
   const handleCambioProveedor = async (nuevoProv: ProveedorLLM) => {
@@ -336,6 +344,7 @@ export function App() {
       }...`
     );
     try {
+      establecerModeloActivo(modeloSeleccionado);
       const resultado = await probarConexionGemini(keyAProbar, proveedorSeleccionado);
       setModeloSeleccionado(resultado.modelo);
       if (resultado.modelosDisponibles && resultado.modelosDisponibles.length > 0) {
