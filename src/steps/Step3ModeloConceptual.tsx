@@ -462,8 +462,8 @@ export function Step3ModeloConceptual({
           data-testid="confirm-step3-btn"
         >
           {modeloConfirmado
-            ? 'Actualizar confirmación del Modelo Conceptual ✓'
-            : 'Confirmar Modelo Conceptual ✓'}
+            ? 'Confirmar Cambios y Avanzar al Paso 4 (Relaciones) ✓'
+            : 'Confirmar Modelo Conceptual y Avanzar al Paso 4 (Relaciones) ✓'}
         </button>
       </div>
     </section>

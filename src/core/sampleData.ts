@@ -282,6 +282,122 @@ export function generarDatosEjemploLocales(
 }
 
 /**
+ * Sincroniza un conjunto de datos de ejemplo existente con un Modelo modificado (ej.: cuando el
+ * estudiante agrega campos manuales en el Paso 3 o modifica relaciones/claves foráneas en el Paso 4
+ * en un proyecto ya avanzado o completado).
+ * Conserva los valores existentes de las columnas que permanecen y rellena las nuevas columnas
+ * o claves foráneas garantizando integridad referencial.
+ */
+export function sincronizarDatosEjemploConModelo(
+  modelo: Modelo,
+  datosActuales?: ConjuntoDatosEjemplo,
+  cantidadFilas = 3
+): ConjuntoDatosEjemplo | undefined {
+  if (!datosActuales || !datosActuales.tablas || datosActuales.tablas.length === 0) {
+    return undefined;
+  }
+
+  const defTablas = construirDefinicionesTablas(modelo);
+  const { tablasOrdenadas } = ordenarTablasTopologicamente(defTablas);
+  const respaldoLocal = generarDatosEjemploLocales(modelo, cantidadFilas);
+
+  const tablasActualesMap = new Map(
+    datosActuales.tablas.map((t) => [sanitizarIdentificadorSQL(t.tabla).toLowerCase(), t])
+  );
+  const respaldoMap = new Map(
+    respaldoLocal.tablas.map((t) => [sanitizarIdentificadorSQL(t.tabla).toLowerCase(), t])
+  );
+
+  // Mapa de PKs efectivas por tabla para asegurar integridad referencial en FKs nuevas o modificadas
+  const pksEfectivasPorTabla = new Map<string, Map<string, any[]>>();
+
+  const tablasSincronizadas: ConjuntoDatosEjemplo['tablas'] = [];
+
+  for (const defTabla of tablasOrdenadas) {
+    const claveTabla = defTabla.nombre.toLowerCase();
+    const tablaPrevia = tablasActualesMap.get(claveTabla);
+    const tablaRespaldo = respaldoMap.get(claveTabla)!;
+    const columnasActualizadas = defTabla.columnas.map((c) => c.nombre);
+
+    const totalFilas =
+      tablaPrevia && tablaPrevia.filas.length > 0
+        ? tablaPrevia.filas.length
+        : tablaRespaldo.filas.length;
+
+    const mapaPKsDeEstaTabla = new Map<string, any[]>();
+    for (const pkCol of defTabla.clavesPrimarias) {
+      mapaPKsDeEstaTabla.set(pkCol.toLowerCase(), []);
+    }
+
+    const filasSincronizadas: Record<string, any>[] = [];
+
+    for (let i = 0; i < totalFilas; i++) {
+      const filaPrevia = tablaPrevia?.filas[i];
+      const filaRespaldo =
+        tablaRespaldo.filas[i % Math.max(1, tablaRespaldo.filas.length)] || {};
+      const nuevaFila: Record<string, any> = {};
+
+      for (const defCol of defTabla.columnas) {
+        const colName = defCol.nombre;
+        let valorFinal: any = undefined;
+
+        if (filaPrevia) {
+          const keyEnPrevia = Object.keys(filaPrevia).find(
+            (k) => sanitizarIdentificadorSQL(k).toLowerCase() === colName.toLowerCase()
+          );
+          if (keyEnPrevia !== undefined && filaPrevia[keyEnPrevia] !== undefined) {
+            valorFinal = filaPrevia[keyEnPrevia];
+          }
+        }
+
+        if (valorFinal === undefined) {
+          valorFinal = filaRespaldo[colName] ?? (defCol.esPK ? i + 1 : null);
+        }
+
+        // Si la columna es FK hacia una tabla padre ya procesada, verificar que el valor apunte a una PK válida
+        const fkDef = defTabla.clavesForaneas.find(
+          (fk) => fk.columnaLocal.toLowerCase() === colName.toLowerCase()
+        );
+        if (fkDef) {
+          const pksPadreMap = pksEfectivasPorTabla.get(fkDef.tablaReferenciada.toLowerCase());
+          const valoresPadreValidos = pksPadreMap?.get(fkDef.columnaReferenciada.toLowerCase());
+          if (valoresPadreValidos && valoresPadreValidos.length > 0) {
+            const esValido = valoresPadreValidos.some((v) => String(v) === String(valorFinal));
+            if (!esValido) {
+              valorFinal = valoresPadreValidos[i % valoresPadreValidos.length];
+            }
+          }
+        }
+
+        nuevaFila[colName] = valorFinal;
+
+        if (defCol.esPK) {
+          const listaPK = mapaPKsDeEstaTabla.get(colName.toLowerCase());
+          if (listaPK && valorFinal !== null && valorFinal !== undefined) {
+            listaPK.push(valorFinal);
+          }
+        }
+      }
+
+      filasSincronizadas.push(nuevaFila);
+    }
+
+    pksEfectivasPorTabla.set(claveTabla, mapaPKsDeEstaTabla);
+    tablasSincronizadas.push({
+      tabla: defTabla.nombre,
+      columnas: columnasActualizadas,
+      filas: filasSincronizadas,
+    });
+  }
+
+  return {
+    tablas: tablasSincronizadas,
+    ordenInsercion: tablasOrdenadas.map((t) => t.nombre),
+    resumenDidactico: datosActuales.resumenDidactico || respaldoLocal.resumenDidactico,
+  };
+}
+
+/**
  * Solicita al tutor IA (Gemini u OpenRouter) la generación de N filas de datos de ejemplo coherentes
  * con el dominio y respetando las claves foráneas e integridad referencial.
  * Si el servicio externo presenta saturación temporal, utiliza automáticamente el generador local de respaldo.

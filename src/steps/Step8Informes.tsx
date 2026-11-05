@@ -27,6 +27,7 @@ export interface Step8InformesProps {
   motorSeleccionado?: MotorBaseDatos;
   ddlGenerado?: string;
   datosEjemplo?: ConjuntoDatosEjemplo;
+  baseSQLiteGenerada?: boolean;
   informes: Informe[];
   informesConfirmados: boolean;
   cargandoIA?: boolean;
@@ -130,6 +131,7 @@ export function Step8Informes({
   motorSeleccionado = 'sqlite',
   ddlGenerado,
   datosEjemplo,
+  baseSQLiteGenerada = true,
   informes,
   informesConfirmados,
   cargandoIA = false,
@@ -178,7 +180,7 @@ export function Step8Informes({
       const tablas = await sqliteClient.obtenerResumenTablas();
       const sinTablas = tablas.length === 0;
       const sinFilas = tablas.every((t) => t.totalFilas === 0);
-      if (sinTablas || sinFilas) {
+      if (!baseSQLiteGenerada || sinTablas || sinFilas) {
         const ddl = ddlGenerado || generarDDLSQLite(modelo);
         if (ddl && ddl.trim()) {
           await sqliteClient.ejecutarDDL(ddl);

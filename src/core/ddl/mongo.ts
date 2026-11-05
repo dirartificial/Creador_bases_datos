@@ -263,7 +263,7 @@ export function construirDefinicionesMongo(
         if (normalizar(rel.destino) === normalizar(ent.nombre)) {
           const padre = entidadesMap.get(normalizar(rel.origen));
           if (padre) {
-            const fk = buscarAtributoFK(ent, padre);
+            const fk = buscarAtributoFK(ent, padre, rel);
             if (fk) {
               const campoLocal = sanitizarIdentificadorMongo(fk.atributoLocal);
               const prop = propiedades.find((p) => p.nombre === campoLocal);

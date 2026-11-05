@@ -58,6 +58,8 @@ export const RelacionSchema = z.object({
   descripcion: z.string().min(1, 'La descripción de la relación es obligatoria'),
   obligatoriaEnOrigen: z.boolean(),
   obligatoriaEnDestino: z.boolean(),
+  campoOrigen: z.string().optional(),
+  campoDestino: z.string().optional(),
 });
 
 export type Relacion = z.infer<typeof RelacionSchema>;

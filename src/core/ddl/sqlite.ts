@@ -14,6 +14,7 @@ import {
   DefinicionColumnaSQL,
   DefinicionTablaSQL,
 } from './types';
+import { buscarAtributoFK as buscarAtributoFKUnificado } from './common';
 
 // Soporte robusto ESM / CJS para node-sql-parser en Vite y Node
 const ParserConstructor =
@@ -204,29 +205,11 @@ export function construirDefinicionesTablas(
 
     // Detectar claves foráneas basadas en las relaciones 1:N y 1:1
     for (const rel of modelo.relaciones) {
-      if (rel.cardinalidad === '1:N') {
-        // En 1:N (Origen=1 -> Destino=N), la FK vive en el destino
+      if (rel.cardinalidad === '1:N' || rel.cardinalidad === '1:1') {
         if (normalizar(rel.destino) === normalizar(ent.nombre)) {
           const padreEnt = entidadesMap.get(normalizar(rel.origen));
           if (padreEnt) {
-            const fkEncontrada = buscarAtributoFK(ent, padreEnt);
-            if (fkEncontrada) {
-              clavesForaneas.push({
-                columnaLocal: sanitizarIdentificadorSQL(fkEncontrada.atributoLocal),
-                tablaReferenciada: sanitizarIdentificadorSQL(padreEnt.nombre),
-                columnaReferenciada: sanitizarIdentificadorSQL(fkEncontrada.columnaPadre),
-                onDelete,
-                onUpdate,
-              });
-            }
-          }
-        }
-      } else if (rel.cardinalidad === '1:1') {
-        // En 1:1, si la entidad actual tiene la FK hacia la otra
-        if (normalizar(rel.destino) === normalizar(ent.nombre)) {
-          const padreEnt = entidadesMap.get(normalizar(rel.origen));
-          if (padreEnt) {
-            const fkEncontrada = buscarAtributoFK(ent, padreEnt);
+            const fkEncontrada = buscarAtributoFKUnificado(ent, padreEnt, rel);
             if (fkEncontrada) {
               clavesForaneas.push({
                 columnaLocal: sanitizarIdentificadorSQL(fkEncontrada.atributoLocal),

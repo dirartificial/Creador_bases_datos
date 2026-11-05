@@ -1,4 +1,4 @@
-import { Entidad, Modelo, OpcionesGeneracionDDL, TipoConceptual } from '../schemas';
+import { Entidad, Modelo, OpcionesGeneracionDDL, Relacion, TipoConceptual } from '../schemas';
 import {
   DefinicionClaveForaneaSQL,
   DefinicionColumnaSQL,
@@ -35,34 +35,113 @@ export function normalizar(texto: string): string {
 }
 
 /**
+ * Genera variantes normalizadas (singular/plural) del nombre de una entidad
+ * para reconocer claves foráneas creadas manualmente (ej.: "clientes" <-> "id_cliente").
+ */
+export function obtenerVariantesNombreEntidad(nombreEntidad: string): string[] {
+  const base = normalizar(nombreEntidad).replace(/[\s-]+/g, '_');
+  const variantes = new Set<string>([base]);
+
+  if (base.length > 3) {
+    if (base.endsWith('es') && base.length > 4) {
+      variantes.add(base.slice(0, -2));
+    }
+    if (base.endsWith('s')) {
+      variantes.add(base.slice(0, -1));
+    } else {
+      variantes.add(`${base}s`);
+      variantes.add(`${base}es`);
+    }
+  }
+
+  return Array.from(variantes).filter(Boolean);
+}
+
+/**
  * Detecta si una entidad ya tiene un atributo que funcione como clave foránea
- * apuntando a la entidad padre.
+ * apuntando a la entidad padre, priorizando los campos explícitamente indicados en la relación.
  */
 export function buscarAtributoFK(
   entidadHijo: Entidad,
-  entidadPadre: Entidad
+  entidadPadre: Entidad,
+  relacion?: Relacion
 ): { atributoLocal: string; columnaPadre: string } | null {
-  const nombrePadreNorm = normalizar(entidadPadre.nombre);
   const pkPadre = entidadPadre.atributos.find((a) => a.esClavePrimaria);
-  const nombrePKPadre = pkPadre ? pkPadre.nombre : 'id';
+  let nombrePKPadre = pkPadre ? pkPadre.nombre : entidadPadre.atributos[0]?.nombre ?? 'id';
+
+  // Si la relación especifica explícitamente qué campo de la entidad padre se referencia:
+  if (relacion?.campoOrigen) {
+    const campoOrigenNorm = normalizar(relacion.campoOrigen);
+    const attrPadreExplicito = entidadPadre.atributos.find(
+      (a) => normalizar(a.nombre) === campoOrigenNorm
+    );
+    if (attrPadreExplicito) {
+      nombrePKPadre = attrPadreExplicito.nombre;
+    }
+  }
+
+  // 1. Prioridad máxima: si la relación especifica explícitamente el campo foráneo en la tabla destino
+  if (relacion?.campoDestino) {
+    const campoDestinoNorm = normalizar(relacion.campoDestino);
+    const attrHijoExplicito = entidadHijo.atributos.find(
+      (a) => normalizar(a.nombre) === campoDestinoNorm
+    );
+    if (attrHijoExplicito) {
+      return {
+        atributoLocal: attrHijoExplicito.nombre,
+        columnaPadre: nombrePKPadre,
+      };
+    }
+  }
+
+  const variantesPadre = obtenerVariantesNombreEntidad(entidadPadre.nombre);
   const nombrePKPadreNorm = normalizar(nombrePKPadre);
+  const totalPKsHijo = entidadHijo.atributos.filter((a) => a.esClavePrimaria).length;
 
   for (const attr of entidadHijo.atributos) {
-    const nom = normalizar(attr.nombre);
+    const nom = normalizar(attr.nombre).replace(/[\s-]+/g, '_');
+    const esPKExclusivaHijo = attr.esClavePrimaria && totalPKsHijo === 1;
 
-    // Si coincide con el nombre de la PK del padre (ej: id_cliente) y no es su propia PK exclusiva
-    if (nombrePKPadreNorm && nom === nombrePKPadreNorm && !attr.esClavePrimaria) {
+    // Coincidencia exacta con el nombre de la PK del padre (ej: id_cliente) cuando no es su propia PK simple
+    if (
+      nombrePKPadreNorm &&
+      nombrePKPadreNorm !== 'id' &&
+      nom === nombrePKPadreNorm &&
+      !esPKExclusivaHijo
+    ) {
       return { atributoLocal: attr.nombre, columnaPadre: nombrePKPadre };
     }
 
-    // O si sigue la convención id_<padre> o <padre>_id
-    if (
-      nom === `id_${nombrePadreNorm}` ||
-      nom === `id${nombrePadreNorm}` ||
-      nom === `${nombrePadreNorm}_id` ||
-      nom === `${nombrePadreNorm}id`
-    ) {
-      return { atributoLocal: attr.nombre, columnaPadre: nombrePKPadre };
+    // Coincidencia con cualquiera de las variantes singular/plural de la entidad padre
+    for (const variante of variantesPadre) {
+      if (
+        nom === `id_${variante}` ||
+        nom === `id${variante}` ||
+        nom === `${variante}_id` ||
+        nom === `${variante}id` ||
+        nom === `cod_${variante}` ||
+        nom === `${variante}_cod` ||
+        nom === `codigo_${variante}` ||
+        nom === `${variante}_codigo` ||
+        nom === `fk_${variante}` ||
+        nom === `${variante}_fk` ||
+        nom === `${variante}fk` ||
+        (!esPKExclusivaHijo && nom === variante)
+      ) {
+        return { atributoLocal: attr.nombre, columnaPadre: nombrePKPadre };
+      }
+
+      if (
+        !esPKExclusivaHijo &&
+        (nom.startsWith('id_') ||
+          nom.endsWith('_id') ||
+          nom.includes('fk') ||
+          nom.startsWith('cod_') ||
+          nom.endsWith('_cod')) &&
+        nom.includes(variante)
+      ) {
+        return { atributoLocal: attr.nombre, columnaPadre: nombrePKPadre };
+      }
     }
   }
 
@@ -160,15 +239,54 @@ export function construirDefinicionesTablasBase(
         if (normalizar(rel.destino) === normalizar(ent.nombre)) {
           const padreEnt = entidadesMap.get(normalizar(rel.origen));
           if (padreEnt) {
-            const fkEncontrada = buscarAtributoFK(ent, padreEnt);
+            const fkEncontrada = buscarAtributoFK(ent, padreEnt, rel);
             if (fkEncontrada) {
-              clavesForaneas.push({
-                columnaLocal: sanitizarIdentificadorSQL(fkEncontrada.atributoLocal),
-                tablaReferenciada: sanitizarIdentificadorSQL(padreEnt.nombre),
-                columnaReferenciada: sanitizarIdentificadorSQL(fkEncontrada.columnaPadre),
-                onDelete,
-                onUpdate,
-              });
+              const colLocalSanitizada = sanitizarIdentificadorSQL(fkEncontrada.atributoLocal);
+              const tablaRefSanitizada = sanitizarIdentificadorSQL(padreEnt.nombre);
+              if (
+                !clavesForaneas.some(
+                  (fk) =>
+                    fk.columnaLocal === colLocalSanitizada &&
+                    fk.tablaReferenciada === tablaRefSanitizada
+                )
+              ) {
+                clavesForaneas.push({
+                  columnaLocal: colLocalSanitizada,
+                  tablaReferenciada: tablaRefSanitizada,
+                  columnaReferenciada: sanitizarIdentificadorSQL(fkEncontrada.columnaPadre),
+                  onDelete,
+                  onUpdate,
+                });
+              }
+            }
+          }
+        } else if (rel.cardinalidad === '1:1' && normalizar(rel.origen) === normalizar(ent.nombre)) {
+          // En relaciones 1:1, si la tabla destino no tiene la FK pero la tabla origen sí la tiene,
+          // permitimos registrar la referencia desde el origen hacia el destino
+          const otraEnt = entidadesMap.get(normalizar(rel.destino));
+          if (otraEnt) {
+            const fkEnDestino = buscarAtributoFK(otraEnt, ent, rel);
+            if (!fkEnDestino) {
+              const fkEnOrigen = buscarAtributoFK(ent, otraEnt);
+              if (fkEnOrigen) {
+                const colLocalSanitizada = sanitizarIdentificadorSQL(fkEnOrigen.atributoLocal);
+                const tablaRefSanitizada = sanitizarIdentificadorSQL(otraEnt.nombre);
+                if (
+                  !clavesForaneas.some(
+                    (fk) =>
+                      fk.columnaLocal === colLocalSanitizada &&
+                      fk.tablaReferenciada === tablaRefSanitizada
+                  )
+                ) {
+                  clavesForaneas.push({
+                    columnaLocal: colLocalSanitizada,
+                    tablaReferenciada: tablaRefSanitizada,
+                    columnaReferenciada: sanitizarIdentificadorSQL(fkEnOrigen.columnaPadre),
+                    onDelete,
+                    onUpdate,
+                  });
+                }
+              }
             }
           }
         }

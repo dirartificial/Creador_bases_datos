@@ -12,6 +12,7 @@ import {
   RondaAclaracion,
 } from './schemas';
 import { formatearContextoRondas } from './clarity';
+import { buscarAtributoFK, obtenerVariantesNombreEntidad } from './ddl/common';
 
 export type CodigoRegla =
   | 'ENTIDAD_SIN_PK'
@@ -67,8 +68,21 @@ export function normalizarNombre(nombre: string): string {
  * Determina si una entidad contiene un atributo que funcione como clave foránea (FK)
  * haciendo referencia a la clave primaria de otra entidad padre.
  */
-export function tieneAtributoFK(entidadHijo: Entidad, entidadPadre: Entidad): boolean {
-  const nombrePadreNorm = normalizarNombre(entidadPadre.nombre);
+export function tieneAtributoFK(
+  entidadHijo: Entidad,
+  entidadPadre: Entidad,
+  relacion?: Relacion
+): boolean {
+  if (relacion?.campoDestino && relacion.campoDestino.trim() !== '') {
+    const campoDestinoNorm = normalizarNombre(relacion.campoDestino);
+    return entidadHijo.atributos.some((a) => normalizarNombre(a.nombre) === campoDestinoNorm);
+  }
+
+  if (buscarAtributoFK(entidadHijo, entidadPadre, relacion) !== null) {
+    return true;
+  }
+
+  const variantesPadre = obtenerVariantesNombreEntidad(entidadPadre.nombre);
   const pkPadre = entidadPadre.atributos.find((a) => a.esClavePrimaria);
   const nombrePKPadreNorm = pkPadre ? normalizarNombre(pkPadre.nombre) : '';
 
@@ -80,26 +94,28 @@ export function tieneAtributoFK(entidadHijo: Entidad, entidadPadre: Entidad): bo
       return true;
     }
 
-    // Patrones típicos de claves foráneas
-    if (
-      nom === `id_${nombrePadreNorm}` ||
-      nom === `${nombrePadreNorm}_id` ||
-      nom === `id${nombrePadreNorm}` ||
-      nom === `cod_${nombrePadreNorm}` ||
-      nom === `${nombrePadreNorm}_cod` ||
-      nom === `fk_${nombrePadreNorm}` ||
-      nom === `${nombrePadreNorm}fk` ||
-      nom === nombrePadreNorm
-    ) {
-      return true;
-    }
+    for (const nombrePadreNorm of variantesPadre) {
+      // Patrones típicos de claves foráneas
+      if (
+        nom === `id_${nombrePadreNorm}` ||
+        nom === `${nombrePadreNorm}_id` ||
+        nom === `id${nombrePadreNorm}` ||
+        nom === `cod_${nombrePadreNorm}` ||
+        nom === `${nombrePadreNorm}_cod` ||
+        nom === `fk_${nombrePadreNorm}` ||
+        nom === `${nombrePadreNorm}fk` ||
+        nom === nombrePadreNorm
+      ) {
+        return true;
+      }
 
-    // Coincidencias contextuales como id_cliente_dueno
-    if (
-      (nom.startsWith('id_') || nom.endsWith('_id') || nom.includes('fk')) &&
-      nom.includes(nombrePadreNorm)
-    ) {
-      return true;
+      // Coincidencias contextuales como id_cliente_dueno
+      if (
+        (nom.startsWith('id_') || nom.endsWith('_id') || nom.includes('fk')) &&
+        nom.includes(nombrePadreNorm)
+      ) {
+        return true;
+      }
     }
 
     return false;
@@ -109,7 +125,14 @@ export function tieneAtributoFK(entidadHijo: Entidad, entidadPadre: Entidad): bo
 /**
  * Obtiene el nombre sugerido para una clave foránea hacia la entidad padre.
  */
-export function obtenerNombreAtributoFKPropuesto(entidadPadre: Entidad): string {
+export function obtenerNombreAtributoFKPropuesto(
+  entidadPadre: Entidad,
+  relacion?: Relacion
+): string {
+  if (relacion?.campoDestino && relacion.campoDestino.trim() !== '') {
+    return relacion.campoDestino.trim();
+  }
+
   const pkPadre = entidadPadre.atributos.find((a) => a.esClavePrimaria);
   const nombrePadre = normalizarNombre(entidadPadre.nombre);
 
@@ -306,9 +329,9 @@ export function verificarClavesForaneas(modelo: Modelo): ObservacionValidacion[]
     if (rel.cardinalidad === '1:N') {
       // En una relación 1:N (Origen=1 -> Destino=N), la entidad del lado N (destino)
       // debe contener un atributo FK apuntando a la PK del lado 1 (origen).
-      const tieneFK = tieneAtributoFK(destinoEnt, origenEnt);
+      const tieneFK = tieneAtributoFK(destinoEnt, origenEnt, rel);
       if (!tieneFK) {
-        const nombrePropuesto = obtenerNombreAtributoFKPropuesto(origenEnt);
+        const nombrePropuesto = obtenerNombreAtributoFKPropuesto(origenEnt, rel);
         obs.push({
           codigo: 'FK_FALTANTE',
           gravedad: 'advertencia',
@@ -329,11 +352,11 @@ export function verificarClavesForaneas(modelo: Modelo): ObservacionValidacion[]
       }
     } else if (rel.cardinalidad === '1:1') {
       // En una relación 1:1, al menos una de las dos entidades debe tener FK apuntando a la otra.
-      const fkEnDestino = tieneAtributoFK(destinoEnt, origenEnt);
+      const fkEnDestino = tieneAtributoFK(destinoEnt, origenEnt, rel);
       const fkEnOrigen = tieneAtributoFK(origenEnt, destinoEnt);
 
       if (!fkEnDestino && !fkEnOrigen) {
-        const nombrePropuesto = obtenerNombreAtributoFKPropuesto(origenEnt);
+        const nombrePropuesto = obtenerNombreAtributoFKPropuesto(origenEnt, rel);
         obs.push({
           codigo: 'FK_FALTANTE',
           gravedad: 'advertencia',
@@ -484,12 +507,13 @@ export function validarModelo(modelo: Modelo): ResultadoValidacion {
 
 /**
  * Resuelve automáticamente una clave foránea faltante agregando el atributo correspondiente
- * en la entidad de destino.
+ * en la entidad de destino y vinculando explícitamente los campos en la relación.
  */
 export function resolverFKFaltante(
   modelo: Modelo,
   entidadDestinoNombre: string,
-  entidadOrigenNombre: string
+  entidadOrigenNombre: string,
+  nombreCampoPersonalizado?: string
 ): Modelo {
   const origenNorm = normalizarNombre(entidadOrigenNombre);
   const destinoNorm = normalizarNombre(entidadDestinoNombre);
@@ -499,16 +523,28 @@ export function resolverFKFaltante(
     return modelo;
   }
 
+  const relAsociada = modelo.relaciones.find(
+    (r) =>
+      normalizarNombre(r.origen) === origenNorm &&
+      normalizarNombre(r.destino) === destinoNorm &&
+      (r.cardinalidad === '1:N' || r.cardinalidad === '1:1')
+  );
+
   const pkOrigen = entidadOrigen.atributos.find((a) => a.esClavePrimaria);
   const tipoOrigen = pkOrigen?.tipoConceptual ?? 'entero';
-  const nombreFK = obtenerNombreAtributoFKPropuesto(entidadOrigen);
+  const nombreFK =
+    nombreCampoPersonalizado?.trim() ||
+    obtenerNombreAtributoFKPropuesto(entidadOrigen, relAsociada);
 
   const entidadesActualizadas = modelo.entidades.map((ent) => {
     if (normalizarNombre(ent.nombre) !== destinoNorm) {
       return ent;
     }
 
-    if (tieneAtributoFK(ent, entidadOrigen)) {
+    const yaExisteCampo = ent.atributos.some(
+      (a) => normalizarNombre(a.nombre) === normalizarNombre(nombreFK)
+    );
+    if (yaExisteCampo || (!nombreCampoPersonalizado && tieneAtributoFK(ent, entidadOrigen, relAsociada))) {
       return ent;
     }
 
@@ -530,9 +566,25 @@ export function resolverFKFaltante(
     };
   });
 
+  const relacionesActualizadas = modelo.relaciones.map((rel) => {
+    if (
+      normalizarNombre(rel.origen) === origenNorm &&
+      normalizarNombre(rel.destino) === destinoNorm &&
+      (rel.cardinalidad === '1:N' || rel.cardinalidad === '1:1')
+    ) {
+      return {
+        ...rel,
+        campoOrigen: rel.campoOrigen || pkOrigen?.nombre || 'id',
+        campoDestino: rel.campoDestino || nombreFK,
+      };
+    }
+    return rel;
+  });
+
   return {
     ...modelo,
     entidades: entidadesActualizadas,
+    relaciones: relacionesActualizadas,
   };
 }
 
@@ -611,6 +663,8 @@ export function crearTablaIntermediaParaNM(modelo: Modelo, relacion: Relacion): 
     descripcion: `Un(a) ${nombreOrigen} puede vincularse múltiples veces en ${nombreIntermedia}.`,
     obligatoriaEnOrigen: false,
     obligatoriaEnDestino: true,
+    campoOrigen: pkOrigen?.nombre ?? 'id',
+    campoDestino: fkOrigenNombre,
   };
 
   const relacionDestinoAIntermedia: Relacion = {
@@ -620,6 +674,8 @@ export function crearTablaIntermediaParaNM(modelo: Modelo, relacion: Relacion): 
     descripcion: `Un(a) ${nombreDestino} puede vincularse múltiples veces en ${nombreIntermedia}.`,
     obligatoriaEnOrigen: false,
     obligatoriaEnDestino: true,
+    campoOrigen: pkDestino?.nombre ?? 'id',
+    campoDestino: fkDestinoNombre,
   };
 
   return {

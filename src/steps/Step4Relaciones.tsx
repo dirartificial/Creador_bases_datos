@@ -1,10 +1,13 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { Cardinalidad, Modelo, Relacion, RespuestaExplicacionObservaciones } from '../core/schemas';
 import {
   crearTablaIntermediaParaNM,
+  normalizarNombre,
+  obtenerNombreAtributoFKPropuesto,
   resolverFKFaltante,
   validarModelo,
 } from '../core/modelValidator';
+import { buscarAtributoFK } from '../core/ddl/common';
 
 export interface Step4RelacionesProps {
   modelo: Modelo;
@@ -42,10 +45,52 @@ export function Step4Relaciones({
     () => modelo.entidades[1]?.nombre || modelo.entidades[0]?.nombre || ''
   );
   const [formCardinalidad, setFormCardinalidad] = useState<Cardinalidad>('1:N');
+  const [formCampoOrigen, setFormCampoOrigen] = useState<string>('');
+  const [formCampoDestino, setFormCampoDestino] = useState<string>('');
   const [formDescripcion, setFormDescripcion] = useState<string>('');
   const [formObligatoriaOrigen, setFormObligatoriaOrigen] = useState<boolean>(false);
   const [formObligatoriaDestino, setFormObligatoriaDestino] = useState<boolean>(true);
   const [errorFormulario, setErrorFormulario] = useState<string | null>(null);
+
+  // Sincronizar selectores si cambian las entidades del modelo en el Paso 3
+  useEffect(() => {
+    if (modelo.entidades.length === 0) return;
+    const existeOrigen = modelo.entidades.some((e) => e.nombre === formOrigen);
+    if (!existeOrigen) {
+      setFormOrigen(modelo.entidades[0]?.nombre || '');
+    }
+    const existeDestino = modelo.entidades.some((e) => e.nombre === formDestino);
+    if (!existeDestino) {
+      setFormDestino(modelo.entidades[1]?.nombre || modelo.entidades[0]?.nombre || '');
+    }
+  }, [modelo.entidades, formOrigen, formDestino]);
+
+  const entidadOrigenSeleccionada = useMemo(
+    () => modelo.entidades.find((e) => normalizarNombre(e.nombre) === normalizarNombre(formOrigen)),
+    [modelo.entidades, formOrigen]
+  );
+
+  const entidadDestinoSeleccionada = useMemo(
+    () => modelo.entidades.find((e) => normalizarNombre(e.nombre) === normalizarNombre(formDestino)),
+    [modelo.entidades, formDestino]
+  );
+
+  const pkOrigenDetectada = useMemo(
+    () =>
+      entidadOrigenSeleccionada?.atributos.find((a) => a.esClavePrimaria) ||
+      entidadOrigenSeleccionada?.atributos[0],
+    [entidadOrigenSeleccionada]
+  );
+
+  const fkDetectadaAutomatica = useMemo(() => {
+    if (!entidadOrigenSeleccionada || !entidadDestinoSeleccionada) return null;
+    return buscarAtributoFK(entidadDestinoSeleccionada, entidadOrigenSeleccionada);
+  }, [entidadOrigenSeleccionada, entidadDestinoSeleccionada]);
+
+  const nombreFKPropuestoParaDestino = useMemo(() => {
+    if (!entidadOrigenSeleccionada) return 'id_origen';
+    return obtenerNombreAtributoFKPropuesto(entidadOrigenSeleccionada);
+  }, [entidadOrigenSeleccionada]);
 
   // Validación determinística en tiempo real
   const resultadoValidacion = useMemo(() => validarModelo(modelo), [modelo]);
@@ -57,6 +102,8 @@ export function Step4Relaciones({
     setFormOrigen(rel.origen);
     setFormDestino(rel.destino);
     setFormCardinalidad(rel.cardinalidad);
+    setFormCampoOrigen(rel.campoOrigen || '');
+    setFormCampoDestino(rel.campoDestino || '');
     setFormDescripcion(rel.descripcion);
     setFormObligatoriaOrigen(rel.obligatoriaEnOrigen);
     setFormObligatoriaDestino(rel.obligatoriaEnDestino);
@@ -65,6 +112,8 @@ export function Step4Relaciones({
 
   const cancelarEdicion = () => {
     setIndiceEditando(null);
+    setFormCampoOrigen('');
+    setFormCampoDestino('');
     setFormDescripcion('');
     setErrorFormulario(null);
   };
@@ -84,6 +133,53 @@ export function Step4Relaciones({
       return;
     }
 
+    let entidadesActualizadas = modelo.entidades;
+    let campoOrigenFinal: string | undefined = undefined;
+    let campoDestinoFinal: string | undefined = undefined;
+
+    if (formCardinalidad !== 'N:M') {
+      campoOrigenFinal = formCampoOrigen.trim() || pkOrigenDetectada?.nombre || undefined;
+
+      if (formCampoDestino === '__crear_fk__' && entidadOrigenSeleccionada && entidadDestinoSeleccionada) {
+        const nombreNuevoFK = nombreFKPropuestoParaDestino;
+        const attrRefOrigen =
+          entidadOrigenSeleccionada.atributos.find(
+            (a) => normalizarNombre(a.nombre) === normalizarNombre(campoOrigenFinal || '')
+          ) || pkOrigenDetectada;
+        const tipoFK = attrRefOrigen?.tipoConceptual ?? 'entero';
+
+        entidadesActualizadas = modelo.entidades.map((ent) => {
+          if (normalizarNombre(ent.nombre) !== normalizarNombre(entidadDestinoSeleccionada.nombre)) {
+            return ent;
+          }
+          const yaExiste = ent.atributos.some(
+            (a) => normalizarNombre(a.nombre) === normalizarNombre(nombreNuevoFK)
+          );
+          if (yaExiste) return ent;
+          return {
+            ...ent,
+            atributos: [
+              ...ent.atributos,
+              {
+                nombre: nombreNuevoFK,
+                tipoConceptual: tipoFK,
+                obligatorio: formObligatoriaOrigen,
+                unico: formCardinalidad === '1:1',
+                esClavePrimaria: false,
+                justificacion: `Clave foránea (FK) que referencia al campo "${
+                  campoOrigenFinal || 'id'
+                }" de la tabla "${entidadOrigenSeleccionada.nombre}".`,
+              },
+            ],
+          };
+        });
+        campoDestinoFinal = nombreNuevoFK;
+      } else {
+        campoDestinoFinal =
+          formCampoDestino.trim() || fkDetectadaAutomatica?.atributoLocal || undefined;
+      }
+    }
+
     const nuevaRel: Relacion = {
       origen: formOrigen,
       destino: formDestino,
@@ -91,30 +187,111 @@ export function Step4Relaciones({
       descripcion: descLimpia,
       obligatoriaEnOrigen: formObligatoriaOrigen,
       obligatoriaEnDestino: formObligatoriaDestino,
+      ...(campoOrigenFinal ? { campoOrigen: campoOrigenFinal } : {}),
+      ...(campoDestinoFinal ? { campoDestino: campoDestinoFinal } : {}),
     };
 
     let relacionesActualizadas: Relacion[];
     let descripcionDecision = '';
 
+    const detalleCampos =
+      campoOrigenFinal && campoDestinoFinal
+        ? ` vinculando ${nuevaRel.origen}.${campoOrigenFinal} → ${nuevaRel.destino}.${campoDestinoFinal} (FK)`
+        : '';
+
     if (indiceEditando !== null) {
       relacionesActualizadas = modelo.relaciones.map((r, i) =>
         i === indiceEditando ? nuevaRel : r
       );
-      descripcionDecision = `Modificó la relación entre ${nuevaRel.origen} y ${nuevaRel.destino} (${nuevaRel.cardinalidad}).`;
+      descripcionDecision = `Modificó la relación entre ${nuevaRel.origen} y ${nuevaRel.destino} (${nuevaRel.cardinalidad})${detalleCampos}.`;
       setIndiceEditando(null);
     } else {
       relacionesActualizadas = [...modelo.relaciones, nuevaRel];
-      descripcionDecision = `Agregó relación: ${nuevaRel.origen} (${nuevaRel.cardinalidad}) ${nuevaRel.destino} - "${nuevaRel.descripcion}".`;
+      descripcionDecision = `Agregó relación: ${nuevaRel.origen} (${nuevaRel.cardinalidad}) ${nuevaRel.destino}${detalleCampos} - "${nuevaRel.descripcion}".`;
     }
 
+    setFormCampoOrigen('');
+    setFormCampoDestino('');
     setFormDescripcion('');
+    onActualizarModelo(
+      {
+        ...modelo,
+        entidades: entidadesActualizadas,
+        relaciones: relacionesActualizadas,
+      },
+      {
+        descripcion: descripcionDecision,
+        origen: 'estudiante',
+      }
+    );
+  };
+
+  const handleCambiarCampoForaneoInline = (idx: number, valorSeleccionado: string) => {
+    const rel = modelo.relaciones[idx];
+    if (!rel) return;
+
+    const entOrigen = modelo.entidades.find(
+      (e) => normalizarNombre(e.nombre) === normalizarNombre(rel.origen)
+    );
+    const entDestino = modelo.entidades.find(
+      (e) => normalizarNombre(e.nombre) === normalizarNombre(rel.destino)
+    );
+    if (!entOrigen || !entDestino) return;
+
+    const pkOrigen = entOrigen.atributos.find((a) => a.esClavePrimaria) || entOrigen.atributos[0];
+    const campoOrigenActual = rel.campoOrigen || pkOrigen?.nombre || 'id';
+
+    if (valorSeleccionado === '__crear_fk__') {
+      const modeloConFK = resolverFKFaltante(modelo, entDestino.nombre, entOrigen.nombre);
+      onActualizarModelo(modeloConFK, {
+        descripcion: `Creó y vinculó automáticamente el campo foráneo en "${entDestino.nombre}" hacia "${entOrigen.nombre}".`,
+        origen: 'estudiante',
+      });
+      return;
+    }
+
+    const relacionesActualizadas = modelo.relaciones.map((r, i) => {
+      if (i !== idx) return r;
+      return {
+        ...r,
+        campoOrigen: campoOrigenActual,
+        campoDestino: valorSeleccionado || undefined,
+      };
+    });
+
     onActualizarModelo(
       {
         ...modelo,
         relaciones: relacionesActualizadas,
       },
       {
-        descripcion: descripcionDecision,
+        descripcion: valorSeleccionado
+          ? `Seleccionó el campo "${valorSeleccionado}" en "${rel.destino}" como clave foránea (FK) vinculada con "${rel.origen}.${campoOrigenActual}".`
+          : `Restableció detección automática de clave foránea entre "${rel.origen}" y "${rel.destino}".`,
+        origen: 'estudiante',
+      }
+    );
+  };
+
+  const handleCambiarCampoOrigenInline = (idx: number, nuevoCampoOrigen: string) => {
+    const rel = modelo.relaciones[idx];
+    if (!rel) return;
+
+    const relacionesActualizadas = modelo.relaciones.map((r, i) => {
+      if (i !== idx) return r;
+      return {
+        ...r,
+        campoOrigen: nuevoCampoOrigen || undefined,
+      };
+    });
+
+    onActualizarModelo(
+      {
+        ...modelo,
+        relaciones: relacionesActualizadas,
+      },
+      {
+        descripcion: `Seleccionó el campo "${nuevoCampoOrigen}" en "${rel.origen}" como campo referenciado por "${rel.destino}".`,
         origen: 'estudiante',
       }
     );
@@ -392,65 +569,191 @@ export function Step4Relaciones({
           </div>
         ) : (
           <div className="relations-grid" data-testid="relations-grid">
-            {modelo.relaciones.map((rel, idx) => (
-              <div
-                key={idx}
-                className={`relation-item-card ${indiceEditando === idx ? 'editing' : ''}`}
-                data-testid={`relation-card-${idx}`}
-              >
-                <div className="relation-header">
-                  <div className="relation-entities-flow">
-                    <span className="relation-entity-pill">{rel.origen}</span>
-                    <span className="relation-cardinality-badge" data-testid={`cardinality-${idx}`}>
-                      {rel.cardinalidad}
+            {modelo.relaciones.map((rel, idx) => {
+              const entOrigenRel = modelo.entidades.find(
+                (e) => normalizarNombre(e.nombre) === normalizarNombre(rel.origen)
+              );
+              const entDestinoRel = modelo.entidades.find(
+                (e) => normalizarNombre(e.nombre) === normalizarNombre(rel.destino)
+              );
+              const pkOrigenRel =
+                entOrigenRel?.atributos.find((a) => a.esClavePrimaria) ||
+                entOrigenRel?.atributos[0];
+              const fkDetectadaRel =
+                entOrigenRel && entDestinoRel
+                  ? buscarAtributoFK(entDestinoRel, entOrigenRel, rel)
+                  : null;
+              const campoOrigenActual =
+                rel.campoOrigen || fkDetectadaRel?.columnaPadre || pkOrigenRel?.nombre || 'id';
+              const campoDestinoActual = rel.campoDestino || fkDetectadaRel?.atributoLocal || '';
+              const nombreFKPropuestoRel = entOrigenRel
+                ? obtenerNombreAtributoFKPropuesto(entOrigenRel, rel)
+                : 'id_origen';
+
+              return (
+                <div
+                  key={idx}
+                  className={`relation-item-card ${indiceEditando === idx ? 'editing' : ''}`}
+                  data-testid={`relation-card-${idx}`}
+                >
+                  <div className="relation-header">
+                    <div className="relation-entities-flow">
+                      <span className="relation-entity-pill">{rel.origen}</span>
+                      <span
+                        className="relation-cardinality-badge"
+                        data-testid={`cardinality-${idx}`}
+                      >
+                        {rel.cardinalidad}
+                      </span>
+                      <span className="relation-entity-pill">{rel.destino}</span>
+                    </div>
+
+                    <div className="relation-actions">
+                      <button
+                        type="button"
+                        className="btn btn-secondary btn-xs"
+                        onClick={() => iniciarEdicion(idx)}
+                        disabled={cargando}
+                        data-testid={`edit-relation-btn-${idx}`}
+                      >
+                        ✏ Editar
+                      </button>
+                      <button
+                        type="button"
+                        className="btn btn-danger btn-xs"
+                        onClick={() => handleEliminarRelacion(idx)}
+                        disabled={cargando}
+                        data-testid={`delete-relation-btn-${idx}`}
+                      >
+                        ✕ Borrar
+                      </button>
+                    </div>
+                  </div>
+
+                  <p className="relation-desc" data-testid={`relation-desc-${idx}`}>
+                    &ldquo;{rel.descripcion}&rdquo;
+                  </p>
+
+                  {/* Selector intuitivo de campos que conectan ambas tablas (PK <-> FK) */}
+                  {(rel.cardinalidad === '1:N' || rel.cardinalidad === '1:1') &&
+                    entOrigenRel &&
+                    entDestinoRel && (
+                      <div
+                        className="relation-fields-mapping"
+                        data-testid={`relation-fields-info-${idx}`}
+                        style={{
+                          marginTop: '0.6rem',
+                          marginBottom: '0.6rem',
+                          padding: '0.6rem 0.75rem',
+                          borderRadius: '8px',
+                          backgroundColor: 'rgba(99, 102, 241, 0.08)',
+                          border: '1px solid rgba(99, 102, 241, 0.25)',
+                          display: 'flex',
+                          flexWrap: 'wrap',
+                          alignItems: 'center',
+                          gap: '0.5rem',
+                          fontSize: '0.85rem',
+                        }}
+                      >
+                        <span style={{ fontWeight: 600 }}>🔗 Campos vinculados:</span>
+                        <label
+                          style={{ display: 'inline-flex', alignItems: 'center', gap: '0.35rem' }}
+                        >
+                          <span>
+                            Campo en <strong>{entOrigenRel.nombre}</strong> (PK):
+                          </span>
+                          <select
+                            className="select-input"
+                            style={{
+                              padding: '0.2rem 0.45rem',
+                              fontSize: '0.82rem',
+                              width: 'auto',
+                              minWidth: '120px',
+                            }}
+                            value={campoOrigenActual}
+                            onChange={(e) => handleCambiarCampoOrigenInline(idx, e.target.value)}
+                            disabled={cargando}
+                            aria-label={`Campo en tabla ${entOrigenRel.nombre} para relación ${idx}`}
+                            data-testid={`inline-origin-field-select-${idx}`}
+                          >
+                            {entOrigenRel.atributos.map((attr) => (
+                              <option key={attr.nombre} value={attr.nombre}>
+                                {attr.nombre}
+                                {attr.esClavePrimaria ? ' (PK)' : ''}
+                              </option>
+                            ))}
+                          </select>
+                        </label>
+
+                        <span style={{ fontWeight: 700, color: 'var(--color-primary, #6366f1)' }}>
+                          ➔ con ➔
+                        </span>
+
+                        <label
+                          style={{ display: 'inline-flex', alignItems: 'center', gap: '0.35rem' }}
+                        >
+                          <span>
+                            Campo en <strong>{entDestinoRel.nombre}</strong> (Foránea FK):
+                          </span>
+                          <select
+                            className="select-input"
+                            style={{
+                              padding: '0.2rem 0.45rem',
+                              fontSize: '0.82rem',
+                              width: 'auto',
+                              minWidth: '150px',
+                            }}
+                            value={campoDestinoActual}
+                            onChange={(e) => handleCambiarCampoForaneoInline(idx, e.target.value)}
+                            disabled={cargando}
+                            aria-label={`Campo foráneo en tabla ${entDestinoRel.nombre} para relación ${idx}`}
+                            data-testid={`inline-fk-select-${idx}`}
+                          >
+                            <option value="">
+                              {fkDetectadaRel
+                                ? `Automático (${fkDetectadaRel.atributoLocal})`
+                                : '-- Seleccionar campo FK --'}
+                            </option>
+                            {entDestinoRel.atributos.map((attr) => (
+                              <option key={attr.nombre} value={attr.nombre}>
+                                {attr.nombre} ({attr.tipoConceptual}
+                                {attr.esClavePrimaria ? ' · PK' : ' · FK'})
+                              </option>
+                            ))}
+                            {!entDestinoRel.atributos.some(
+                              (a) =>
+                                normalizarNombre(a.nombre) ===
+                                normalizarNombre(nombreFKPropuestoRel)
+                            ) && (
+                              <option value="__crear_fk__">
+                                ➕ Crear campo &ldquo;{nombreFKPropuestoRel}&rdquo; en{' '}
+                                {entDestinoRel.nombre}
+                              </option>
+                            )}
+                          </select>
+                        </label>
+                      </div>
+                    )}
+
+                  <div className="relation-footer-tags">
+                    <span
+                      className={`nullability-badge ${
+                        rel.obligatoriaEnOrigen ? 'badge-mandatory' : 'badge-optional'
+                      }`}
+                    >
+                      {rel.origen}: {rel.obligatoriaEnOrigen ? 'Obligatorio' : 'Opcional'}
                     </span>
-                    <span className="relation-entity-pill">{rel.destino}</span>
-                  </div>
-
-                  <div className="relation-actions">
-                    <button
-                      type="button"
-                      className="btn btn-secondary btn-xs"
-                      onClick={() => iniciarEdicion(idx)}
-                      disabled={cargando}
-                      data-testid={`edit-relation-btn-${idx}`}
+                    <span
+                      className={`nullability-badge ${
+                        rel.obligatoriaEnDestino ? 'badge-mandatory' : 'badge-optional'
+                      }`}
                     >
-                      ✏ Editar
-                    </button>
-                    <button
-                      type="button"
-                      className="btn btn-danger btn-xs"
-                      onClick={() => handleEliminarRelacion(idx)}
-                      disabled={cargando}
-                      data-testid={`delete-relation-btn-${idx}`}
-                    >
-                      ✕ Borrar
-                    </button>
+                      {rel.destino}: {rel.obligatoriaEnDestino ? 'Obligatorio' : 'Opcional'}
+                    </span>
                   </div>
                 </div>
-
-                <p className="relation-desc" data-testid={`relation-desc-${idx}`}>
-                  &ldquo;{rel.descripcion}&rdquo;
-                </p>
-
-                <div className="relation-footer-tags">
-                  <span
-                    className={`nullability-badge ${
-                      rel.obligatoriaEnOrigen ? 'badge-mandatory' : 'badge-optional'
-                    }`}
-                  >
-                    {rel.origen}: {rel.obligatoriaEnOrigen ? 'Obligatorio' : 'Opcional'}
-                  </span>
-                  <span
-                    className={`nullability-badge ${
-                      rel.obligatoriaEnDestino ? 'badge-mandatory' : 'badge-optional'
-                    }`}
-                  >
-                    {rel.destino}: {rel.obligatoriaEnDestino ? 'Obligatorio' : 'Opcional'}
-                  </span>
-                </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
         )}
       </div>
@@ -477,7 +780,10 @@ export function Step4Relaciones({
                 id="rel-origen-select"
                 className="select-input"
                 value={formOrigen}
-                onChange={(e) => setFormOrigen(e.target.value)}
+                onChange={(e) => {
+                  setFormOrigen(e.target.value);
+                  setFormCampoOrigen('');
+                }}
                 disabled={cargando}
                 data-testid="rel-origin-select"
               >
@@ -515,7 +821,10 @@ export function Step4Relaciones({
                 id="rel-destino-select"
                 className="select-input"
                 value={formDestino}
-                onChange={(e) => setFormDestino(e.target.value)}
+                onChange={(e) => {
+                  setFormDestino(e.target.value);
+                  setFormCampoDestino('');
+                }}
                 disabled={cargando}
                 data-testid="rel-dest-select"
               >
@@ -527,6 +836,126 @@ export function Step4Relaciones({
               </select>
             </div>
           </div>
+
+          {/* Selección explícita e intuitiva de los campos que relacionan las tablas */}
+          {formCardinalidad !== 'N:M' && entidadOrigenSeleccionada && entidadDestinoSeleccionada && (
+            <div
+              className="relation-fields-selector-box"
+              data-testid="relation-fields-selector-box"
+              style={{
+                marginBottom: '1rem',
+                padding: '0.85rem 1rem',
+                borderRadius: '10px',
+                backgroundColor: 'rgba(99, 102, 241, 0.06)',
+                border: '1px solid rgba(99, 102, 241, 0.25)',
+              }}
+            >
+              <div
+                style={{
+                  fontWeight: 600,
+                  marginBottom: '0.5rem',
+                  fontSize: '0.92rem',
+                }}
+              >
+                🔗 Especificar qué campos conectan las tablas (Clave Primaria ↔ Clave Foránea)
+              </div>
+              <div className="form-grid-3" style={{ alignItems: 'end' }}>
+                <div className="form-group" style={{ marginBottom: 0 }}>
+                  <label htmlFor="rel-campo-origen-select" className="form-label">
+                    Campo en tabla &ldquo;{entidadOrigenSeleccionada.nombre}&rdquo; (Clave Primaria)
+                  </label>
+                  <select
+                    id="rel-campo-origen-select"
+                    className="select-input"
+                    value={formCampoOrigen}
+                    onChange={(e) => setFormCampoOrigen(e.target.value)}
+                    disabled={cargando}
+                    data-testid="rel-origin-field-select"
+                  >
+                    <option value="">
+                      Automático ({pkOrigenDetectada ? `${pkOrigenDetectada.nombre} [PK]` : 'id'})
+                    </option>
+                    {entidadOrigenSeleccionada.atributos.map((attr) => (
+                      <option key={attr.nombre} value={attr.nombre}>
+                        {attr.nombre} ({attr.tipoConceptual}
+                        {attr.esClavePrimaria ? ' · Clave Primaria PK' : ''})
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div
+                  style={{
+                    textAlign: 'center',
+                    paddingBottom: '0.55rem',
+                    fontWeight: 700,
+                    fontSize: '0.9rem',
+                  }}
+                >
+                  ➔ se conecta con ➔
+                </div>
+
+                <div className="form-group" style={{ marginBottom: 0 }}>
+                  <label htmlFor="rel-campo-destino-select" className="form-label">
+                    Campo en otra tabla &ldquo;{entidadDestinoSeleccionada.nombre}&rdquo; que sea la
+                    Foránea (FK)
+                  </label>
+                  <select
+                    id="rel-campo-destino-select"
+                    className="select-input"
+                    value={formCampoDestino}
+                    onChange={(e) => setFormCampoDestino(e.target.value)}
+                    disabled={cargando}
+                    data-testid="rel-dest-field-select"
+                  >
+                    <option value="">
+                      {fkDetectadaAutomatica
+                        ? `Detectar automáticamente (${fkDetectadaAutomatica.atributoLocal})`
+                        : '-- Detectar automáticamente o elegir campo --'}
+                    </option>
+                    {entidadDestinoSeleccionada.atributos.map((attr) => (
+                      <option key={attr.nombre} value={attr.nombre}>
+                        {attr.nombre} ({attr.tipoConceptual}
+                        {attr.esClavePrimaria
+                          ? ' · PK'
+                          : ` · Campo en ${entidadDestinoSeleccionada.nombre}`}
+                        )
+                      </option>
+                    ))}
+                    {!entidadDestinoSeleccionada.atributos.some(
+                      (a) =>
+                        normalizarNombre(a.nombre) ===
+                        normalizarNombre(nombreFKPropuestoParaDestino)
+                    ) && (
+                      <option value="__crear_fk__">
+                        ➕ Crear automáticamente campo &ldquo;{nombreFKPropuestoParaDestino}&rdquo;
+                        en {entidadDestinoSeleccionada.nombre} (FK)
+                      </option>
+                    )}
+                  </select>
+                </div>
+              </div>
+
+              <p
+                className="form-help"
+                style={{ marginTop: '0.55rem', marginBottom: 0 }}
+                data-testid="relation-fields-preview"
+              >
+                📌 <strong>Resumen de conexión:</strong> El campo{' '}
+                <code>{formCampoOrigen || pkOrigenDetectada?.nombre || 'id'}</code> de la tabla{' '}
+                <strong>{entidadOrigenSeleccionada.nombre}</strong> se relacionará con el campo
+                foráneo (FK){' '}
+                <code>
+                  {formCampoDestino === '__crear_fk__'
+                    ? `${nombreFKPropuestoParaDestino} (se creará al guardar)`
+                    : formCampoDestino ||
+                      fkDetectadaAutomatica?.atributoLocal ||
+                      '(elegí un campo manual o crealo automáticamente)'}
+                </code>{' '}
+                en la tabla <strong>{entidadDestinoSeleccionada.nombre}</strong>.
+              </p>
+            </div>
+          )}
 
           <div className="form-group">
             <label htmlFor="rel-descripcion-input" className="form-label">

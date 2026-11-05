@@ -43,6 +43,7 @@ import {
 } from './core/clarity';
 import {
   explicarObservacionesConIA,
+  normalizarNombre,
   sugerirRelacionesConIA,
   validarModelo,
 } from './core/modelValidator';
@@ -62,6 +63,7 @@ import {
   generarDatosEjemploConIA,
   generarDatosEjemploLocales,
   generarInsertStatementsSQLite,
+  sincronizarDatosEjemploConModelo,
 } from './core/sampleData';
 import { sqliteClient } from './core/workers/sqliteClient';
 import { generarConsultaInformeConIA } from './core/reports';
@@ -582,33 +584,154 @@ export function App() {
   };
 
 
+  // --- Sincronización reactiva de artefactos derivados al modificar el modelo en pasos previos ---
+  function generarDDLSegunMotor(
+    modelo: Modelo,
+    motor?: MotorBaseDatos,
+    opciones?: OpcionesGeneracionDDL
+  ): string {
+    switch (motor) {
+      case 'postgresql':
+        return generarDDLPostgres(modelo, opciones);
+      case 'mysql':
+        return generarDDLMySQL(modelo, opciones);
+      case 'mongodb':
+        return generarScriptMongo(modelo, opciones);
+      case 'sqlite':
+      default:
+        return generarDDLSQLite(modelo, opciones);
+    }
+  }
+
+  function sincronizarDerivadosDelProyecto(
+    prev: ProyectoEstado,
+    nuevoModelo: Modelo,
+    nuevoMotor?: MotorBaseDatos,
+    nuevasOpciones?: OpcionesGeneracionDDL
+  ): Partial<ProyectoEstado> {
+    const motorEfectivo = nuevoMotor ?? prev.motorSeleccionado ?? 'sqlite';
+    const opcionesEfectivas = nuevasOpciones ?? prev.opcionesDDL;
+    const tieneEntidades = nuevoModelo.entidades.length > 0;
+
+    const ddlActualizado =
+      tieneEntidades && (prev.ddlGenerado !== undefined || prev.ddlConfirmado)
+        ? generarDDLSegunMotor(nuevoModelo, motorEfectivo, opcionesEfectivas)
+        : prev.ddlGenerado;
+
+    const datosActualizados =
+      tieneEntidades && prev.datosEjemplo
+        ? sincronizarDatosEjemploConModelo(
+            nuevoModelo,
+            prev.datosEjemplo,
+            prev.cantidadFilasEjemplo ?? 3
+          )
+        : prev.datosEjemplo;
+
+    return {
+      modelo: nuevoModelo,
+      ddlGenerado: ddlActualizado,
+      datosEjemplo: datosActualizados,
+      baseSQLiteGenerada: false,
+      analisisResumido: undefined,
+    };
+  }
+
   // --- Paso 3: Edición manual y regeneración de entidades ---
   const handleActualizarEntidadesPaso3 = (
     nuevasEntidades: Entidad[],
     decisionOpcional?: { descripcion: string; origen: Decision['origen'] }
   ) => {
-    const nuevasDecisiones = decisionOpcional
-      ? [
-          ...proyecto.bitacora,
-          crearRegistroDecision({
-            paso: 3,
-            descripcion: decisionOpcional.descripcion,
-            origen: decisionOpcional.origen,
-          }),
-        ]
-      : proyecto.bitacora;
+    void actualizarYGuardarProyecto((prev) => {
+      const nuevasDecisiones = decisionOpcional
+        ? [
+            ...prev.bitacora,
+            crearRegistroDecision({
+              paso: 3,
+              descripcion: decisionOpcional.descripcion,
+              origen: decisionOpcional.origen,
+            }),
+          ]
+        : prev.bitacora;
 
-    const nuevoEstado: ProyectoEstado = {
-      ...proyecto,
-      modeloConceptualConfirmado: false,
-      modelo: {
-        ...proyecto.modelo,
+      // Propagar cambios de nombres de entidades o atributos hacia las relaciones existentes
+      let relacionesSincronizadas = prev.modelo.relaciones;
+      if (nuevasEntidades.length === prev.modelo.entidades.length) {
+        const mapaEntidadesRenombradas = new Map<string, string>();
+        const mapaAtributosRenombradosPorEntidad = new Map<string, Map<string, string>>();
+
+        prev.modelo.entidades.forEach((entVieja, eIdx) => {
+          const entNueva = nuevasEntidades[eIdx];
+          if (!entNueva) return;
+          if (entVieja.nombre !== entNueva.nombre) {
+            mapaEntidadesRenombradas.set(normalizarNombre(entVieja.nombre), entNueva.nombre);
+          }
+          if (entVieja.atributos.length === entNueva.atributos.length) {
+            const mapaAttrs = new Map<string, string>();
+            entVieja.atributos.forEach((attrViejo, aIdx) => {
+              const attrNuevo = entNueva.atributos[aIdx];
+              if (attrNuevo && attrViejo.nombre !== attrNuevo.nombre) {
+                mapaAttrs.set(normalizarNombre(attrViejo.nombre), attrNuevo.nombre);
+              }
+            });
+            if (mapaAttrs.size > 0) {
+              mapaAtributosRenombradosPorEntidad.set(
+                normalizarNombre(entNueva.nombre),
+                mapaAttrs
+              );
+            }
+          }
+        });
+
+        if (
+          mapaEntidadesRenombradas.size > 0 ||
+          mapaAtributosRenombradosPorEntidad.size > 0
+        ) {
+          relacionesSincronizadas = prev.modelo.relaciones.map((rel) => {
+            const nuevoOrigen =
+              mapaEntidadesRenombradas.get(normalizarNombre(rel.origen)) ?? rel.origen;
+            const nuevoDestino =
+              mapaEntidadesRenombradas.get(normalizarNombre(rel.destino)) ?? rel.destino;
+
+            const attrsOrigenMap = mapaAtributosRenombradosPorEntidad.get(
+              normalizarNombre(nuevoOrigen)
+            );
+            const attrsDestinoMap = mapaAtributosRenombradosPorEntidad.get(
+              normalizarNombre(nuevoDestino)
+            );
+
+            const nuevoCampoOrigen =
+              rel.campoOrigen && attrsOrigenMap
+                ? (attrsOrigenMap.get(normalizarNombre(rel.campoOrigen)) ?? rel.campoOrigen)
+                : rel.campoOrigen;
+            const nuevoCampoDestino =
+              rel.campoDestino && attrsDestinoMap
+                ? (attrsDestinoMap.get(normalizarNombre(rel.campoDestino)) ?? rel.campoDestino)
+                : rel.campoDestino;
+
+            return {
+              ...rel,
+              origen: nuevoOrigen,
+              destino: nuevoDestino,
+              ...(nuevoCampoOrigen ? { campoOrigen: nuevoCampoOrigen } : {}),
+              ...(nuevoCampoDestino ? { campoDestino: nuevoCampoDestino } : {}),
+            };
+          });
+        }
+      }
+
+      const nuevoModelo: Modelo = {
+        ...prev.modelo,
         entidades: nuevasEntidades,
-      },
-      bitacora: nuevasDecisiones,
-    };
+        relaciones: relacionesSincronizadas,
+      };
 
-    void actualizarYGuardarProyecto(nuevoEstado);
+      return {
+        ...prev,
+        ...sincronizarDerivadosDelProyecto(prev, nuevoModelo),
+        modeloConceptualConfirmado: false,
+        bitacora: nuevasDecisiones,
+      };
+    });
   };
 
   const handleRegenerarModeloConIA = async () => {
@@ -631,18 +754,19 @@ export function App() {
         origen: 'ia_aceptada',
       });
 
-      const nuevoEstado: ProyectoEstado = {
-        ...proyecto,
-        modeloConceptualConfirmado: false,
-        modelo: {
-          ...proyecto.modelo,
+      await actualizarYGuardarProyecto((prev) => {
+        const nuevoModelo: Modelo = {
+          ...prev.modelo,
           entidades: propuesta.entidades,
-        },
-        explicacionModelo: propuesta.explicacionGeneral,
-        bitacora: [...proyecto.bitacora, decisionRegen],
-      };
-
-      await actualizarYGuardarProyecto(nuevoEstado);
+        };
+        return {
+          ...prev,
+          ...sincronizarDerivadosDelProyecto(prev, nuevoModelo),
+          modeloConceptualConfirmado: false,
+          explicacionModelo: propuesta.explicacionGeneral,
+          bitacora: [...prev.bitacora, decisionRegen],
+        };
+      });
     } catch (err) {
       const clasificado = clasificarErrorGemini(err, keyGuardada ?? undefined);
       setEstadoMensaje({
@@ -658,23 +782,25 @@ export function App() {
 
   const handleConfirmarModeloPaso3 = () => {
     setEstadoMensaje(null);
-    const nombresEntidades = proyecto.modelo.entidades.map((e) => e.nombre).join(', ');
-    const decisionConfirmacion = crearRegistroDecision({
-      paso: 3,
-      descripcion: `Confirmó el Modelo Conceptual con las entidades: ${nombresEntidades}.`,
-      origen: 'ia_aceptada',
+    void actualizarYGuardarProyecto((prev) => {
+      const nombresEntidades = prev.modelo.entidades.map((e) => e.nombre).join(', ');
+      const decisionConfirmacion = crearRegistroDecision({
+        paso: 3,
+        descripcion: `Confirmó el Modelo Conceptual con las entidades: ${nombresEntidades}.`,
+        origen: 'ia_aceptada',
+      });
+
+      return {
+        ...prev,
+        ...sincronizarDerivadosDelProyecto(prev, prev.modelo),
+        pasoActual: 4,
+        modeloConceptualConfirmado: true,
+        bitacora: [...prev.bitacora, decisionConfirmacion],
+      };
     });
-
-    const nuevoEstado: ProyectoEstado = {
-      ...proyecto,
-      modeloConceptualConfirmado: true,
-      bitacora: [...proyecto.bitacora, decisionConfirmacion],
-    };
-
-    void actualizarYGuardarProyecto(nuevoEstado);
     setEstadoMensaje({
       tipo: 'exito',
-      texto: 'Modelo Conceptual confirmado y guardado en tu navegador (IndexedDB). Podés continuar al Paso 4 (Relaciones).',
+      texto: 'Modelo Conceptual confirmado y guardado en tu navegador (IndexedDB). Avanzaste al Paso 4 (Relaciones).',
     });
   };
 
@@ -683,25 +809,25 @@ export function App() {
     nuevoModelo: Modelo,
     decisionOpcional?: { descripcion: string; origen: Decision['origen'] }
   ) => {
-    const nuevasDecisiones = decisionOpcional
-      ? [
-          ...proyecto.bitacora,
-          crearRegistroDecision({
-            paso: 4,
-            descripcion: decisionOpcional.descripcion,
-            origen: decisionOpcional.origen,
-          }),
-        ]
-      : proyecto.bitacora;
+    void actualizarYGuardarProyecto((prev) => {
+      const nuevasDecisiones = decisionOpcional
+        ? [
+            ...prev.bitacora,
+            crearRegistroDecision({
+              paso: 4,
+              descripcion: decisionOpcional.descripcion,
+              origen: decisionOpcional.origen,
+            }),
+          ]
+        : prev.bitacora;
 
-    const nuevoEstado: ProyectoEstado = {
-      ...proyecto,
-      relacionesConfirmadas: false,
-      modelo: nuevoModelo,
-      bitacora: nuevasDecisiones,
-    };
-
-    void actualizarYGuardarProyecto(nuevoEstado);
+      return {
+        ...prev,
+        ...sincronizarDerivadosDelProyecto(prev, nuevoModelo),
+        relacionesConfirmadas: false,
+        bitacora: nuevasDecisiones,
+      };
+    });
   };
 
   const handleSugerirRelacionesConIA = async () => {
@@ -721,18 +847,19 @@ export function App() {
         origen: 'ia_aceptada',
       });
 
-      const nuevoEstado: ProyectoEstado = {
-        ...proyecto,
-        relacionesConfirmadas: false,
-        modelo: {
-          ...proyecto.modelo,
+      await actualizarYGuardarProyecto((prev) => {
+        const nuevoModelo: Modelo = {
+          ...prev.modelo,
           relaciones: propuesta.relaciones,
-        },
-        explicacionRelaciones: propuesta.justificacionGeneral,
-        bitacora: [...proyecto.bitacora, decisionSugerencia],
-      };
-
-      await actualizarYGuardarProyecto(nuevoEstado);
+        };
+        return {
+          ...prev,
+          ...sincronizarDerivadosDelProyecto(prev, nuevoModelo),
+          relacionesConfirmadas: false,
+          explicacionRelaciones: propuesta.justificacionGeneral,
+          bitacora: [...prev.bitacora, decisionSugerencia],
+        };
+      });
       setEstadoMensaje({
         tipo: 'exito',
         texto: 'El tutor IA sugirió las relaciones del modelo con sus respectivas cardinalidades.',
@@ -780,10 +907,10 @@ export function App() {
         origen: 'ia_aceptada',
       });
 
-      await actualizarYGuardarProyecto({
-        ...proyecto,
-        bitacora: [...proyecto.bitacora, decisionExplicacion],
-      });
+      await actualizarYGuardarProyecto((prev) => ({
+        ...prev,
+        bitacora: [...prev.bitacora, decisionExplicacion],
+      }));
     } catch (err) {
       const clasificado = clasificarErrorGemini(err, keyGuardada ?? undefined);
       setEstadoMensaje({
@@ -799,7 +926,7 @@ export function App() {
 
   const handleConfirmarRelacionesPaso4 = () => {
     setEstadoMensaje(null);
-    const validacion = validarModelo(proyecto.modelo);
+    const validacion = validarModelo(proyectoRef.current.modelo);
     if (!validacion.valido) {
       setEstadoMensaje({
         tipo: 'error',
@@ -808,44 +935,47 @@ export function App() {
       return;
     }
 
-    const decisionConfirmacion = crearRegistroDecision({
-      paso: 4,
-      descripcion: `Confirmó el diseño relacional con ${proyecto.modelo.relaciones.length} relaciones.`,
-      origen: 'estudiante',
+    void actualizarYGuardarProyecto((prev) => {
+      const decisionConfirmacion = crearRegistroDecision({
+        paso: 4,
+        descripcion: `Confirmó el diseño relacional con ${prev.modelo.relaciones.length} relaciones.`,
+        origen: 'estudiante',
+      });
+
+      return {
+        ...prev,
+        ...sincronizarDerivadosDelProyecto(prev, prev.modelo),
+        pasoActual: 5,
+        relacionesConfirmadas: true,
+        bitacora: [...prev.bitacora, decisionConfirmacion],
+      };
     });
-
-    const nuevoEstado: ProyectoEstado = {
-      ...proyecto,
-      relacionesConfirmadas: true,
-      bitacora: [...proyecto.bitacora, decisionConfirmacion],
-    };
-
-    void actualizarYGuardarProyecto(nuevoEstado);
     setEstadoMensaje({
       tipo: 'exito',
-      texto: 'Diseño relacional y cardinalidades confirmadas correctamente. Podés avanzar al Paso 5 (Diagrama ER).',
+      texto: 'Diseño relacional y cardinalidades confirmadas correctamente. Avanzaste al Paso 5 (Diagrama ER).',
     });
   };
 
   // --- Paso 5: Diagrama ER ---
   const handleConfirmarDiagramaPaso5 = () => {
     setEstadoMensaje(null);
-    const decisionConfirmacion = crearRegistroDecision({
-      paso: 5,
-      descripcion: `Confirmó el Diagrama ER con ${proyecto.modelo.entidades.length} entidades y ${proyecto.modelo.relaciones.length} relaciones.`,
-      origen: 'estudiante',
+    void actualizarYGuardarProyecto((prev) => {
+      const decisionConfirmacion = crearRegistroDecision({
+        paso: 5,
+        descripcion: `Confirmó el Diagrama ER con ${prev.modelo.entidades.length} entidades y ${prev.modelo.relaciones.length} relaciones.`,
+        origen: 'estudiante',
+      });
+
+      return {
+        ...prev,
+        pasoActual: 6,
+        diagramaConfirmado: true,
+        bitacora: [...prev.bitacora, decisionConfirmacion],
+      };
     });
-
-    const nuevoEstado: ProyectoEstado = {
-      ...proyecto,
-      diagramaConfirmado: true,
-      bitacora: [...proyecto.bitacora, decisionConfirmacion],
-    };
-
-    void actualizarYGuardarProyecto(nuevoEstado);
     setEstadoMensaje({
       tipo: 'exito',
-      texto: 'Diagrama ER confirmado. Ya podés continuar al Paso 6 (Motor y DDL).',
+      texto: 'Diagrama ER confirmado. Avanzaste al Paso 6 (Motor y DDL).',
     });
   };
 
@@ -857,33 +987,27 @@ export function App() {
       origen: 'estudiante',
     });
 
-    void actualizarYGuardarProyecto({
-      ...proyecto,
+    void actualizarYGuardarProyecto((prev) => ({
+      ...prev,
+      ...sincronizarDerivadosDelProyecto(prev, prev.modelo, motor, prev.opcionesDDL),
       motorSeleccionado: motor,
-      bitacora: [...proyecto.bitacora, decisionMotor],
-    });
+      bitacora: [...prev.bitacora, decisionMotor],
+    }));
   };
 
   const handleActualizarOpcionesDDLPaso6 = (opciones: OpcionesGeneracionDDL) => {
-    void actualizarYGuardarProyecto({
-      ...proyecto,
+    void actualizarYGuardarProyecto((prev) => ({
+      ...prev,
+      ...sincronizarDerivadosDelProyecto(prev, prev.modelo, prev.motorSeleccionado, opciones),
       opcionesDDL: opciones,
-    });
+    }));
   };
 
   function obtenerDDLDelProyecto(proj: ProyectoEstado): string {
-    if (proj.ddlGenerado) return proj.ddlGenerado;
-    switch (proj.motorSeleccionado) {
-      case 'postgresql':
-        return generarDDLPostgres(proj.modelo, proj.opcionesDDL);
-      case 'mysql':
-        return generarDDLMySQL(proj.modelo, proj.opcionesDDL);
-      case 'mongodb':
-        return generarScriptMongo(proj.modelo, proj.opcionesDDL);
-      case 'sqlite':
-      default:
-        return generarDDLSQLite(proj.modelo, proj.opcionesDDL);
+    if (proj.modelo && proj.modelo.entidades.length > 0) {
+      return generarDDLSegunMotor(proj.modelo, proj.motorSeleccionado, proj.opcionesDDL);
     }
+    return proj.ddlGenerado ?? '';
   }
 
   const handlePedirExplicacionIAPaso6 = async (ddlActual: string) => {
@@ -1059,9 +1183,9 @@ export function App() {
     try {
       const actual = proyectoRef.current;
       const ddlAEjecutar =
-        actual.motorSeleccionado === 'sqlite' && actual.ddlGenerado
-          ? actual.ddlGenerado
-          : generarDDLSQLite(actual.modelo, actual.opcionesDDL);
+        actual.modelo && actual.modelo.entidades.length > 0
+          ? generarDDLSQLite(actual.modelo, actual.opcionesDDL)
+          : actual.ddlGenerado || '';
       await sqliteClient.ejecutarDDL(ddlAEjecutar);
 
       if (actual.datosEjemplo) {
@@ -1126,9 +1250,9 @@ export function App() {
     if (!baseGenerada) {
       try {
         const ddlAEjecutar =
-          actual.motorSeleccionado === 'sqlite' && actual.ddlGenerado
-            ? actual.ddlGenerado
-            : generarDDLSQLite(actual.modelo, actual.opcionesDDL);
+          actual.modelo && actual.modelo.entidades.length > 0
+            ? generarDDLSQLite(actual.modelo, actual.opcionesDDL)
+            : actual.ddlGenerado || '';
         await sqliteClient.ejecutarDDL(ddlAEjecutar);
         if (actual.datosEjemplo) {
           const inserts = generarInsertStatementsSQLite(actual.datosEjemplo);
@@ -1869,64 +1993,102 @@ export function App() {
               )}
 
               {proyecto.pasoActual === 4 && (
-                <Step4Relaciones
-                  modelo={proyecto.modelo}
-                  relacionesConfirmadas={Boolean(proyecto.relacionesConfirmadas)}
-                  explicacionRelaciones={proyecto.explicacionRelaciones}
-                  cargando={cargandoIA}
-                  onActualizarModelo={handleActualizarModeloPaso4}
-                  onSugerirConIA={handleSugerirRelacionesConIA}
-                  onPedirExplicacionIA={handlePedirExplicacionIAPaso4}
-                  explicacionesIA={explicacionesIAPaso4}
-                  onConfirmarRelaciones={handleConfirmarRelacionesPaso4}
-                  onVolverPaso3={() =>
-                    void actualizarYGuardarProyecto({ ...proyecto, pasoActual: 3 })
-                  }
-                />
+                <>
+                  {proyecto.modeloConceptualConfirmado && (
+                    <div
+                      className="alert alert-success"
+                      data-testid="model-confirmed-banner"
+                      style={{ marginBottom: '0.75rem' }}
+                    >
+                      <strong>✓ Modelo Conceptual confirmado por el estudiante.</strong> Podés
+                      definir ahora las relaciones y seleccionar los campos vinculados (PK ↔ FK).
+                    </div>
+                  )}
+                  <Step4Relaciones
+                    modelo={proyecto.modelo}
+                    relacionesConfirmadas={Boolean(proyecto.relacionesConfirmadas)}
+                    explicacionRelaciones={proyecto.explicacionRelaciones}
+                    cargando={cargandoIA}
+                    onActualizarModelo={handleActualizarModeloPaso4}
+                    onSugerirConIA={handleSugerirRelacionesConIA}
+                    onPedirExplicacionIA={handlePedirExplicacionIAPaso4}
+                    explicacionesIA={explicacionesIAPaso4}
+                    onConfirmarRelaciones={handleConfirmarRelacionesPaso4}
+                    onVolverPaso3={() =>
+                      void actualizarYGuardarProyecto((prev) => ({ ...prev, pasoActual: 3 }))
+                    }
+                  />
+                </>
               )}
 
               {proyecto.pasoActual === 5 && (
-                <Step5DiagramaER
-                  modelo={proyecto.modelo}
-                  diagramaConfirmado={Boolean(proyecto.diagramaConfirmado)}
-                  cargando={cargandoIA}
-                  onConfirmarDiagrama={handleConfirmarDiagramaPaso5}
-                  onVolverPaso4={() =>
-                    void actualizarYGuardarProyecto({ ...proyecto, pasoActual: 4 })
-                  }
-                  onRegistrarDecision={(descripcion, origen) => {
-                    const dec = crearRegistroDecision({ paso: 5, descripcion, origen });
-                    void actualizarYGuardarProyecto((prev) => ({
-                      ...prev,
-                      bitacora: [...prev.bitacora, dec],
-                    }));
-                  }}
-                />
+                <>
+                  {proyecto.relacionesConfirmadas && (
+                    <div
+                      role="status"
+                      className="alert alert-success"
+                      data-testid="relations-confirmed-banner"
+                      style={{ marginBottom: '0.75rem' }}
+                    >
+                      <strong>✓ Relaciones confirmadas por el estudiante.</strong> El diseño
+                      relacional está validado y reflejado en este Diagrama ER.
+                    </div>
+                  )}
+                  <Step5DiagramaER
+                    modelo={proyecto.modelo}
+                    diagramaConfirmado={Boolean(proyecto.diagramaConfirmado)}
+                    cargando={cargandoIA}
+                    onConfirmarDiagrama={handleConfirmarDiagramaPaso5}
+                    onVolverPaso4={() =>
+                      void actualizarYGuardarProyecto((prev) => ({ ...prev, pasoActual: 4 }))
+                    }
+                    onRegistrarDecision={(descripcion, origen) => {
+                      const dec = crearRegistroDecision({ paso: 5, descripcion, origen });
+                      void actualizarYGuardarProyecto((prev) => ({
+                        ...prev,
+                        bitacora: [...prev.bitacora, dec],
+                      }));
+                    }}
+                  />
+                </>
               )}
 
               {proyecto.pasoActual === 6 && (
-                <Step6MotorDDL
-                  modelo={proyecto.modelo}
-                  motorSeleccionado={proyecto.motorSeleccionado ?? 'sqlite'}
-                  opcionesDDL={proyecto.opcionesDDL}
-                  explicacionDDL={proyecto.explicacionDDL}
-                  ddlConfirmado={Boolean(proyecto.ddlConfirmado)}
-                  cargandoIA={cargandoIA}
-                  onCambiarMotor={handleCambiarMotorPaso6}
-                  onActualizarOpcionesDDL={handleActualizarOpcionesDDLPaso6}
-                  onPedirExplicacionIA={handlePedirExplicacionIAPaso6}
-                  onConfirmarDDL={handleConfirmarDDLPaso6}
-                  onVolverPaso5={() =>
-                    void actualizarYGuardarProyecto((prev) => ({ ...prev, pasoActual: 5 }))
-                  }
-                  onRegistrarDecision={(descripcion, origen) => {
-                    const dec = crearRegistroDecision({ paso: 6, descripcion, origen });
-                    void actualizarYGuardarProyecto((prev) => ({
-                      ...prev,
-                      bitacora: [...prev.bitacora, dec],
-                    }));
-                  }}
-                />
+                <>
+                  {proyecto.diagramaConfirmado && (
+                    <div
+                      role="status"
+                      className="alert alert-success"
+                      data-testid="diagram-confirmed-banner"
+                      style={{ marginBottom: '0.75rem' }}
+                    >
+                      <strong>✓ Diagrama ER confirmado por el estudiante.</strong> El modelo visual
+                      ha sido validado y está listo para generar el DDL en el Paso 6.
+                    </div>
+                  )}
+                  <Step6MotorDDL
+                    modelo={proyecto.modelo}
+                    motorSeleccionado={proyecto.motorSeleccionado ?? 'sqlite'}
+                    opcionesDDL={proyecto.opcionesDDL}
+                    explicacionDDL={proyecto.explicacionDDL}
+                    ddlConfirmado={Boolean(proyecto.ddlConfirmado)}
+                    cargandoIA={cargandoIA}
+                    onCambiarMotor={handleCambiarMotorPaso6}
+                    onActualizarOpcionesDDL={handleActualizarOpcionesDDLPaso6}
+                    onPedirExplicacionIA={handlePedirExplicacionIAPaso6}
+                    onConfirmarDDL={handleConfirmarDDLPaso6}
+                    onVolverPaso5={() =>
+                      void actualizarYGuardarProyecto((prev) => ({ ...prev, pasoActual: 5 }))
+                    }
+                    onRegistrarDecision={(descripcion, origen) => {
+                      const dec = crearRegistroDecision({ paso: 6, descripcion, origen });
+                      void actualizarYGuardarProyecto((prev) => ({
+                        ...prev,
+                        bitacora: [...prev.bitacora, dec],
+                      }));
+                    }}
+                  />
+                </>
               )}
 
               {proyecto.pasoActual === 7 && (
@@ -1963,12 +2125,9 @@ export function App() {
                 <Step8Informes
                   modelo={proyecto.modelo}
                   motorSeleccionado={proyecto.motorSeleccionado}
-                  ddlGenerado={
-                    proyecto.motorSeleccionado === 'sqlite' && proyecto.ddlGenerado
-                      ? proyecto.ddlGenerado
-                      : generarDDLSQLite(proyecto.modelo, proyecto.opcionesDDL)
-                  }
+                  ddlGenerado={generarDDLSQLite(proyecto.modelo, proyecto.opcionesDDL)}
                   datosEjemplo={proyecto.datosEjemplo}
+                  baseSQLiteGenerada={Boolean(proyecto.baseSQLiteGenerada)}
                   informes={proyecto.informes || []}
                   informesConfirmados={Boolean(proyecto.informesConfirmados)}
                   cargandoIA={cargandoIA}

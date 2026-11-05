@@ -139,14 +139,13 @@ export function generarPaqueteZip(entradas: EntradasPaqueteZip): Uint8Array {
     if (proyecto.modelo && proyecto.modelo.entidades.length > 0) {
       const extension = proyecto.motorSeleccionado === 'mongodb' ? 'js' : 'sql';
       const scriptSeleccionado =
-        proyecto.ddlGenerado ||
-        (proyecto.motorSeleccionado === 'mongodb'
+        proyecto.motorSeleccionado === 'mongodb'
           ? generarScriptMongo(proyecto.modelo, proyecto.opcionesDDL)
           : proyecto.motorSeleccionado === 'postgresql'
           ? generarDDLPostgres(proyecto.modelo, proyecto.opcionesDDL)
           : proyecto.motorSeleccionado === 'mysql'
           ? generarDDLMySQL(proyecto.modelo, proyecto.opcionesDDL)
-          : generarDDLSQLite(proyecto.modelo, proyecto.opcionesDDL));
+          : generarDDLSQLite(proyecto.modelo, proyecto.opcionesDDL);
 
       arbolArchivos[`scripts/esquema.${extension}`] = strToU8(scriptSeleccionado);
 

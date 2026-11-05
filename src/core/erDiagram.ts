@@ -1,4 +1,5 @@
 import { Atributo, Entidad, Modelo, Relacion, TipoConceptual } from './schemas';
+import { buscarAtributoFK, obtenerVariantesNombreEntidad } from './ddl/common';
 
 /**
  * Mapeo de tipos conceptuales del modelo hacia tipos de datos estandarizados de Mermaid ER.
@@ -121,16 +122,42 @@ export function detectarClavesForaneas(modelo: Modelo): Map<string, Set<string>>
     const entDestino = entidadesMap.get(destinoNorm.toLowerCase());
     if (!entDestino) continue;
 
+    // 1. Detección prioritaria por relación explícita (campoDestino) o heurística unificada
+    if (entOrigen) {
+      const fkDetectada = buscarAtributoFK(entDestino, entOrigen, rel);
+      if (fkDetectada) {
+        fksDestino.add(normalizarIdentificadorAtributo(fkDetectada.atributoLocal));
+      } else if (rel.cardinalidad === '1:1') {
+        const fksOrigen = fksPorEntidad.get(origenNorm);
+        const fkEnOrigen = buscarAtributoFK(entOrigen, entDestino);
+        if (fksOrigen && fkEnOrigen) {
+          fksOrigen.add(normalizarIdentificadorAtributo(fkEnOrigen.atributoLocal));
+        }
+      }
+    }
+
+    const variantesOrigen = entOrigen
+      ? obtenerVariantesNombreEntidad(entOrigen.nombre)
+      : [origenNorm.toLowerCase()];
+
     for (const attr of entDestino.atributos) {
       const nombreAttrNorm = normalizarIdentificadorAtributo(attr.nombre).toLowerCase();
-      const origenBase = origenNorm.toLowerCase();
+
+      const coincideVariante = variantesOrigen.some(
+        (origenBase) =>
+          nombreAttrNorm === `id_${origenBase}` ||
+          nombreAttrNorm === `${origenBase}_id` ||
+          nombreAttrNorm === `cod_${origenBase}` ||
+          nombreAttrNorm === `fk_${origenBase}` ||
+          (!attr.esClavePrimaria && nombreAttrNorm === origenBase) ||
+          (pkOrigen && nombreAttrNorm.includes(origenBase) && nombreAttrNorm.includes('id'))
+      );
 
       const esFKPorNombre =
-        nombreAttrNorm === `id_${origenBase}` ||
-        nombreAttrNorm === `${origenBase}_id` ||
-        nombreAttrNorm === origenBase ||
-        (pkOrigen && nombreAttrNorm === normalizarIdentificadorAtributo(pkOrigen.nombre).toLowerCase() && !attr.esClavePrimaria) ||
-        (pkOrigen && nombreAttrNorm.includes(origenBase) && nombreAttrNorm.includes('id'));
+        coincideVariante ||
+        (pkOrigen &&
+          nombreAttrNorm === normalizarIdentificadorAtributo(pkOrigen.nombre).toLowerCase() &&
+          !attr.esClavePrimaria);
 
       if (esFKPorNombre) {
         fksDestino.add(normalizarIdentificadorAtributo(attr.nombre));

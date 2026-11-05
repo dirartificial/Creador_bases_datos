@@ -116,7 +116,7 @@ export function construirDefinicionesTablasPostgres(
         if (normalizar(rel.destino) === normalizar(ent.nombre)) {
           const padreEnt = entidadesMap.get(normalizar(rel.origen));
           if (padreEnt) {
-            const fkEncontrada = buscarAtributoFK(ent, padreEnt);
+            const fkEncontrada = buscarAtributoFK(ent, padreEnt, rel);
             if (fkEncontrada) {
               clavesForaneas.push({
                 columnaLocal: sanitizarIdentificadorSQL(fkEncontrada.atributoLocal),
